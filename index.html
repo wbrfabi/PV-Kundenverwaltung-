@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PV-Kundenverwaltung</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#12161B" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="PV-Kunden" />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+  // Babel-Standalone gibt beim Laden eine Hinweismeldung in der Konsole aus
+  // ("You are using the in-browser Babel transformer..."). Rein informativ,
+  // für dieses kleine Tool nicht relevant — hier ausgeblendet.
+  (function () {
+    var originalWarn = console.warn;
+    console.warn = function () {
+      if (typeof arguments[0] === "string" && arguments[0].indexOf("in-browser Babel transformer") !== -1) return;
+      originalWarn.apply(console, arguments);
+    };
+  })();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.28.4/babel.min.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; background: #12161B; color: #E9ECEF; }
+  .pv-display { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; font-weight: 700; }
+  .pv-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  ::selection { background: #F0B429; color: #1B1300; }
+  input.pv-input, textarea.pv-input {
+    width: 100%; background: #222A33; border: 1px solid #2B333D;
+    color: #E9ECEF; border-radius: 8px; padding: 10px 12px; font-size: 14.5px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; outline: none; transition: border-color .15s, background .15s;
+  }
+  input.pv-input:focus, textarea.pv-input:focus { border-color: #F0B429; background: #262F3A; }
+  input.pv-input::placeholder, textarea.pv-input::placeholder { color: #5C6673; }
+  .pv-btn { cursor: pointer; border: none; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; transition: transform .1s, opacity .15s, background .15s; }
+  .pv-btn:active { transform: scale(0.97); }
+  .pv-btn:disabled { opacity: .55; cursor: default; }
+  .pv-focus:focus-visible { outline: 2px solid #F0B429; outline-offset: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ------------------------------------------------------------------ */
+/*  Lokale Speicherung: localStorage (Kundendaten) + IndexedDB (Fotos) */
+/*  Läuft komplett offline im Browser, genau wie der Rest von          */
+/*  "Master Your Life" — keine externe Anmeldung nötig.                */
+/* ------------------------------------------------------------------ */
+
+const LS_PREFIX = "pvk:";
+function lsGet(key) { try { return localStorage.getItem(LS_PREFIX + key); } catch (e) { return null; } }
+function lsSet(key, value) { try { localStorage.setItem(LS_PREFIX + key, value); return true; } catch (e) { return false; } }
+function lsDelete(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch (e) {} }
+
+function openMediaDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("pvkunden-media", 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore("media"); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function mediaPut(id, dataUrl) {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readwrite");
+    tx.objectStore("media").put(dataUrl, id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function mediaGet(id) {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readonly");
+    const req = tx.objectStore("media").get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function mediaDelete(id) {
+  const db = await openMediaDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readwrite");
+    tx.objectStore("media").delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Konstanten                                                          */
+/* ------------------------------------------------------------------ */
+
+const PHOTO_CATEGORIES = [
+  { key: "hausansicht", label: "Hausansicht" },
+  { key: "dachbelegung_1", label: "Dachbelegung 1" },
+  { key: "dachbelegung_2", label: "Dachbelegung 2" },
+  { key: "dachbelegung_3", label: "Dachbelegung 3" },
+  { key: "dachbelegung_4", label: "Dachbelegung 4" },
+  { key: "dachbelegung_5", label: "Dachbelegung 5" },
+  { key: "dachbelegung_6", label: "Dachbelegung 6" },
+  { key: "dach_ohne_belegung_1", label: "Dach Foto ohne Belegung 1" },
+  { key: "dach_ohne_belegung_2", label: "Dach Foto ohne Belegung 2" },
+  { key: "geruest", label: "Gerüst-Standort" },
+  { key: "ziegeldeckmass_hoehe", label: "Ziegeldeckmaß Höhe" },
+  { key: "ziegeldeckmass_breite", label: "Ziegeldeckmaß Breite" },
+  { key: "traufenhoehe", label: "Traufenhöhe" },
+  { key: "kabelweg_1", label: "Kabelweg 1" },
+  { key: "kabelweg_2", label: "Kabelweg 2" },
+  { key: "kabelweg_3", label: "Kabelweg 3" },
+  { key: "ac_planung", label: "Bilder für AC-Planung" },
+  { key: "kabelweg_4", label: "Kabelweg 4" },
+  { key: "kabelweg_5", label: "Kabelweg 5" },
+  { key: "kabelweg_6", label: "Kabelweg 6" },
+  { key: "kabelweg_7", label: "Kabelweg 7" },
+  { key: "kabelweg_8", label: "Kabelweg 8" },
+  { key: "kabelweg_9", label: "Kabelweg 9" },
+  { key: "kabelweg_10", label: "Kabelweg 10" },
+  { key: "zaehlerschrank", label: "Zählerschrank" },
+  { key: "zaehler", label: "Foto von Zähler" },
+  { key: "zaehlerschrank_raumstruktur", label: "Zählerschrank Raumstruktur" },
+  { key: "speicher_wr_raumstruktur", label: "Speicher & Wechselrichter Raumstruktur" },
+  { key: "erdung", label: "Erdung" },
+  { key: "hausanschluss", label: "Hausanschlusskasten" },
+];
+
+const EMPTY_CUSTOMER = () => ({
+  id: null,
+  vorname: "",
+  nachname: "",
+  email: "",
+  strasse: "",
+  anlagenGroesse: "",
+  wechselrichterGroesse: "",
+  speicherGroesse: "",
+  zusaetze: [],
+  kundenwichtig: "",
+  angebot: [],
+  wirtschaftlichkeit: [],
+  fehlt: "",
+  offeneFragen: "",
+  status: null,
+  photos: {},
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+});
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
+}
+function initials(vorname, nachname) {
+  const a = (vorname || "").trim()[0] || "";
+  const b = (nachname || "").trim()[0] || "";
+  return (a + b).toUpperCase() || "?";
+}
+function photosDoneCount(photos) {
+  if (!photos) return 0;
+  return PHOTO_CATEGORIES.reduce((n, c) => n + (photos[c.key] && photos[c.key].length > 0 ? 1 : 0), 0);
+}
+
+function compressImage(file, maxDim = 1600, quality = 0.78) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Lesefehler"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Bildfehler"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round((height * maxDim) / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round((width * maxDim) / height); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Datenzugriff (Index, Kunde, Medien)                                 */
+/* ------------------------------------------------------------------ */
+
+function collectMediaIds(customer) {
+  const ids = [];
+  Object.values(customer.photos || {}).forEach((list) => (list || []).forEach((p) => ids.push(p.id)));
+  (customer.angebot || []).forEach((d) => ids.push(d.id));
+  (customer.wirtschaftlichkeit || []).forEach((d) => ids.push(d.id));
+  return ids;
+}
+function stripMediaForSave(customer) {
+  const photos = {};
+  Object.entries(customer.photos || {}).forEach(([k, list]) => { photos[k] = (list || []).map((p) => ({ id: p.id })); });
+  const stripDocs = (list) => (list || []).map((d) => ({ id: d.id, name: d.name, type: d.type }));
+  return { ...customer, photos, angebot: stripDocs(customer.angebot), wirtschaftlichkeit: stripDocs(customer.wirtschaftlichkeit) };
+}
+async function hydrateMedia(customer) {
+  const ids = collectMediaIds(customer);
+  if (ids.length === 0) return customer;
+  const entries = await Promise.all(ids.map(async (id) => {
+    try { return [id, await mediaGet(id)]; } catch (e) { return [id, null]; }
+  }));
+  const map = Object.fromEntries(entries);
+  const photos = {};
+  Object.entries(customer.photos || {}).forEach(([k, list]) => { photos[k] = (list || []).map((p) => ({ ...p, url: map[p.id] || null })); });
+  const hydrateDocs = (list) => (list || []).map((d) => ({ ...d, url: map[d.id] || null }));
+  return { ...customer, photos, angebot: hydrateDocs(customer.angebot), wirtschaftlichkeit: hydrateDocs(customer.wirtschaftlichkeit) };
+}
+
+function loadIndexList() {
+  const raw = lsGet("customer-index");
+  return raw ? JSON.parse(raw) : [];
+}
+function saveIndexList(arr) { return lsSet("customer-index", JSON.stringify(arr)); }
+function loadCustomerRaw(id) {
+  const raw = lsGet("customer:" + id);
+  return raw ? JSON.parse(raw) : null;
+}
+function saveCustomerRaw(customer) { return lsSet("customer:" + customer.id, JSON.stringify(customer)); }
+function deleteCustomerRaw(id) { lsDelete("customer:" + id); }
+
+/* ------------------------------------------------------------------ */
+/*  Style-Tokens                                                        */
+/* ------------------------------------------------------------------ */
+
+const T = {
+  bg: "#12161B", panel: "#1B2129", panelAlt: "#222A33", border: "#2B333D",
+  borderLight: "#394452", text: "#E9ECEF", textMuted: "#8993A3", textFaint: "#5C6673",
+  accent: "#C1652F", accent2: "#F0B429", good: "#4E9E76", danger: "#DD5354",
+};
+
+/* ------------------------------------------------------------------ */
+/*  UI-Bausteine                                                        */
+/* ------------------------------------------------------------------ */
+
+function SectionLabel({ icon, children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, marginTop: 28 }}>
+      <span style={{ fontSize: 15, color: T.accent2 }}>{icon}</span>
+      <span className="pv-display" style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: T.textMuted }}>{children}</span>
+    </div>
+  );
+}
+function Field({ label, unit, ...props }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ display: "block", fontSize: 12, color: T.textMuted, marginBottom: 5, fontWeight: 500 }}>{label}</label>
+      <div style={{ position: "relative" }}>
+        <input className={`pv-input pv-focus ${unit ? "pv-mono" : ""}`} style={unit ? { paddingRight: 52 } : undefined} {...props} />
+        {unit && <span className="pv-mono" style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12.5, color: T.textFaint, pointerEvents: "none" }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+function ProgressRing({ value, total, size = 46 }) {
+  const r = (size - 6) / 2; const c = 2 * Math.PI * r; const pct = total > 0 ? value / total : 0;
+  return (
+    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={T.border} strokeWidth="4" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={pct >= 1 ? T.good : T.accent2} strokeWidth="4" strokeDasharray={c} strokeDashoffset={c - pct * c} strokeLinecap="round" style={{ transition: "stroke-dashoffset .3s" }} />
+      </svg>
+      <div className="pv-mono" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 500, color: T.textMuted }}>{value}/{total}</div>
+    </div>
+  );
+}
+function SaveIndicator({ status, errorMessage }) {
+  if (status === "idle") return <div style={{ height: 18 }} />;
+  if (status === "error") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minHeight: 18 }}>
+        <div style={{ fontSize: 12, color: T.danger }}>✕ Speichern fehlgeschlagen – nochmal versuchen</div>
+        {errorMessage && <div className="pv-mono" style={{ fontSize: 10.5, color: T.textFaint }}>{errorMessage}</div>}
+      </div>
+    );
+  }
+  return <div style={{ fontSize: 12, color: status === "saving" ? T.textMuted : T.good, height: 18 }}>{status === "saving" ? "Speichert…" : "✓ Gespeichert"}</div>;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Kundenliste                                                         */
+/* ------------------------------------------------------------------ */
+
+function CustomerList({ index, onOpen, onCreate, onDelete, loading }) {
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "28px 18px 100px" }}>
+      <div style={{ marginBottom: 26 }}>
+        <div className="pv-display" style={{ fontSize: 12, letterSpacing: "0.14em", textTransform: "uppercase", color: T.accent2, fontWeight: 600, marginBottom: 6 }}>PV-Montage · Aufmaß</div>
+        <h1 className="pv-display" style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>Kunden</h1>
+      </div>
+      {loading ? (
+        <div style={{ color: T.textMuted, fontSize: 14, padding: "40px 0", textAlign: "center" }}>Lädt…</div>
+      ) : index.length === 0 ? (
+        <div style={{ border: `1px dashed ${T.border}`, borderRadius: 14, padding: "40px 20px", textAlign: "center", color: T.textMuted }}>
+          <div style={{ fontSize: 14.5, marginBottom: 4, color: T.text }}>Noch keine Kunden angelegt</div>
+          <div style={{ fontSize: 13 }}>Leg deinen ersten Kunden an, um mit dem Aufmaß zu starten.</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {index.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map((c) => (
+            <div key={c.id} role="button" tabIndex={0} onClick={() => onOpen(c.id)}
+              onKeyDown={(e) => { if (e.key === "Enter") onOpen(c.id); }}
+              className="pv-focus"
+              style={{ display: "flex", alignItems: "center", gap: 12, background: T.panel, border: `1px solid ${T.border}`, borderRadius: 12, padding: "13px 14px", textAlign: "left", width: "100%", cursor: "pointer" }}>
+              <div className="pv-display" style={{ width: 40, height: 40, borderRadius: 10, background: T.panelAlt, border: `1px solid ${T.borderLight}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13.5, fontWeight: 600, color: T.accent2, flexShrink: 0 }}>
+                {initials(c.vorname, c.nachname)}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {c.vorname || c.nachname ? `${c.vorname} ${c.nachname}`.trim() : "Neuer Kunde"}
+                </div>
+                <div style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.strasse || "Adresse fehlt noch"}</div>
+              </div>
+              {c.status === "abschluss" && <span className="pv-mono" style={{ fontSize: 10.5, fontWeight: 600, color: T.good, border: `1px solid rgba(78,158,118,0.4)`, borderRadius: 999, padding: "3px 8px", flexShrink: 0 }}>Abschluss</span>}
+              {c.status === "absage" && <span className="pv-mono" style={{ fontSize: 10.5, fontWeight: 600, color: T.danger, border: `1px solid rgba(221,83,84,0.4)`, borderRadius: 999, padding: "3px 8px", flexShrink: 0 }}>Absage</span>}
+              <ProgressRing value={c.photoCount || 0} total={PHOTO_CATEGORIES.length} />
+              <button className="pv-btn pv-focus" onClick={(e) => { e.stopPropagation(); onDelete(c.id, `${c.vorname} ${c.nachname}`.trim()); }}
+                style={{ width: 30, height: 30, borderRadius: 8, background: "transparent", border: `1px solid ${T.border}`, color: T.danger, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 13 }}
+                aria-label="Kunden löschen">🗑</button>
+              <span style={{ color: T.textFaint }}>›</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className="pv-btn pv-focus" onClick={onCreate}
+        style={{ position: "fixed", right: 22, bottom: 26, width: 56, height: 56, borderRadius: 999, background: T.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, boxShadow: "0 8px 22px rgba(193,101,47,0.4)" }}
+        aria-label="Neuen Kunden anlegen">+</button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Foto-Kategorie / Dokumenten-Spalte                                  */
+/* ------------------------------------------------------------------ */
+
+function PhotoCategory({ cat, photos, onAdd, onRemove, uploading }) {
+  const inputRef = useRef(null);
+  const list = photos || []; const done = list.length > 0;
+  return (
+    <div style={{ border: `1px solid ${done ? "rgba(78,158,118,0.4)" : T.border}`, borderRadius: 12, padding: 12, background: T.panel }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+        <div style={{ width: 7, height: 7, borderRadius: 999, background: done ? T.good : T.borderLight, flexShrink: 0 }} />
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: T.text, flex: 1 }}>{cat.label}</div>
+        <span className="pv-mono" style={{ fontSize: 11, color: T.textFaint }}>{list.length}</span>
+      </div>
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+        {list.map((p) => (
+          <div key={p.id} style={{ position: "relative", width: 56, height: 56, borderRadius: 8, overflow: "hidden", border: `1px solid ${T.borderLight}`, flexShrink: 0 }}>
+            <img src={p.url} alt={cat.label} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            <button className="pv-btn" onClick={() => onRemove(cat.key, p)}
+              style={{ position: "absolute", top: 2, right: 2, width: 18, height: 18, borderRadius: 999, background: "rgba(18,22,27,0.85)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}
+              aria-label="Foto löschen">✕</button>
+          </div>
+        ))}
+        <button className="pv-btn pv-focus" onClick={() => inputRef.current && inputRef.current.click()} disabled={uploading}
+          style={{ width: 56, height: 56, borderRadius: 8, border: `1px dashed ${T.borderLight}`, background: T.panelAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+          aria-label={`Foto zu ${cat.label} hinzufügen`}>{uploading ? "…" : "＋"}</button>
+        <input ref={inputRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+          onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) onAdd(cat.key, files); e.target.value = ""; }} />
+      </div>
+    </div>
+  );
+}
+function DocumentColumn({ label, docs, onAdd, onRemove, uploading }) {
+  const inputRef = useRef(null); const list = docs || [];
+  return (
+    <div style={{ border: `1px solid ${list.length ? "rgba(78,158,118,0.4)" : T.border}`, borderRadius: 12, padding: 12, background: T.panel, flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: T.text, flex: 1 }}>{label}</div>
+        <span className="pv-mono" style={{ fontSize: 11, color: T.textFaint }}>{list.length}</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {list.map((d) => (
+          <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 8, background: T.panelAlt, border: `1px solid ${T.border}`, borderRadius: 8, padding: "6px 8px" }}>
+            {d.type && d.type.startsWith("image/") ? (
+              <img src={d.url} alt={d.name} style={{ width: 30, height: 30, borderRadius: 5, objectFit: "cover", flexShrink: 0 }} />
+            ) : <span style={{ flexShrink: 0, color: T.textMuted }}>📄</span>}
+            <a href={d.url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: T.text, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: "none" }}>{d.name}</a>
+            <button className="pv-btn" onClick={() => onRemove(d)} style={{ color: T.textFaint, flexShrink: 0, padding: 2 }} aria-label="Datei entfernen">✕</button>
+          </div>
+        ))}
+        <button className="pv-btn pv-focus" onClick={() => inputRef.current && inputRef.current.click()} disabled={uploading}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, border: `1px dashed ${T.borderLight}`, borderRadius: 8, padding: "9px", color: T.textMuted, background: T.panelAlt, fontSize: 12.5 }}>
+          {uploading ? "…" : "＋"} Datei hinzufügen
+        </button>
+        <input ref={inputRef} type="file" accept="image/*,application/pdf" multiple style={{ display: "none" }}
+          onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) onAdd(files); e.target.value = ""; }} />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Kunden-Detailansicht                                                */
+/* ------------------------------------------------------------------ */
+
+function CustomerDetail({ customer, onChange, onBack, onDelete, onSave, saveStatus, saveError }) {
+  const [uploadingCat, setUploadingCat] = useState(null);
+  const [uploadingDoc, setUploadingDoc] = useState(null);
+  const c = customer;
+  const set = (field, value) => onChange({ ...c, [field]: value });
+
+  const addExtra = () => onChange({ ...c, zusaetze: [...(c.zusaetze || []), { id: uid(), label: "", value: "" }] });
+  const updateExtra = (id, key, value) => onChange({ ...c, zusaetze: (c.zusaetze || []).map((z) => (z.id === id ? { ...z, [key]: value } : z)) });
+  const removeExtra = (id) => onChange({ ...c, zusaetze: (c.zusaetze || []).filter((z) => z.id !== id) });
+
+  const addPhotos = async (catKey, files) => {
+    setUploadingCat(catKey);
+    try {
+      const uploaded = [];
+      for (const f of files) {
+        const dataUrl = await compressImage(f);
+        const id = uid();
+        await mediaPut(id, dataUrl);
+        uploaded.push({ id, url: dataUrl });
+      }
+      const photos = { ...(c.photos || {}) };
+      photos[catKey] = [...(photos[catKey] || []), ...uploaded];
+      onChange({ ...c, photos });
+    } catch (err) {
+      console.error(err);
+      window.alert("Foto konnte nicht gespeichert werden: " + err.message);
+    } finally { setUploadingCat(null); }
+  };
+  const removePhoto = (catKey, photo) => {
+    const photos = { ...(c.photos || {}) };
+    photos[catKey] = (photos[catKey] || []).filter((p) => p.id !== photo.id);
+    onChange({ ...c, photos });
+    mediaDelete(photo.id).catch(() => {});
+  };
+  const addDocs = async (field, files) => {
+    setUploadingDoc(field);
+    try {
+      const uploaded = [];
+      for (const f of files) {
+        const isImage = f.type.startsWith("image/");
+        const dataUrl = isImage ? await compressImage(f) : await new Promise((resolve, reject) => {
+          const r = new FileReader(); r.onerror = () => reject(new Error("Lesefehler")); r.onload = () => resolve(r.result); r.readAsDataURL(f);
+        });
+        const id = uid();
+        await mediaPut(id, dataUrl);
+        uploaded.push({ id, name: f.name, type: f.type, url: dataUrl });
+      }
+      onChange({ ...c, [field]: [...(c[field] || []), ...uploaded] });
+    } catch (err) {
+      console.error(err);
+      window.alert("Datei konnte nicht gespeichert werden: " + err.message);
+    } finally { setUploadingDoc(null); }
+  };
+  const removeDoc = (field, doc) => {
+    onChange({ ...c, [field]: (c[field] || []).filter((d) => d.id !== doc.id) });
+    mediaDelete(doc.id).catch(() => {});
+  };
+
+  const setStatus = (value) => set("status", c.status === value ? null : value);
+  const done = photosDoneCount(c.photos);
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "0 0 90px" }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 5, background: T.bg, borderBottom: `1px solid ${T.border}`, padding: "16px 18px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <button className="pv-btn pv-focus" onClick={onBack}
+            style={{ width: 34, height: 34, borderRadius: 9, background: T.panel, border: `1px solid ${T.border}`, color: T.text, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+            aria-label="Zurück zur Kundenliste">←</button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="pv-display" style={{ fontSize: 17, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {c.vorname || c.nachname ? `${c.vorname} ${c.nachname}`.trim() : "Neuer Kunde"}
+            </div>
+            <SaveIndicator status={saveStatus} errorMessage={saveError} />
+          </div>
+          <ProgressRing value={done} total={PHOTO_CATEGORIES.length} size={40} />
+          <button className="pv-btn pv-focus" onClick={() => onDelete(c)}
+            style={{ width: 34, height: 34, borderRadius: 9, background: "transparent", border: `1px solid ${T.border}`, color: T.danger, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+            aria-label="Kunden löschen">🗑</button>
+        </div>
+        <button type="button" className="pv-btn pv-focus" onClick={() => onSave(c)}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, height: 42, borderRadius: 10, background: T.accent2, color: "#1B1300", fontSize: 14, fontWeight: 600 }}>
+          💾 Speichern
+        </button>
+      </div>
+
+      <div style={{ padding: "0 18px" }}>
+        <SectionLabel icon="👤">Kontakt & Adresse</SectionLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Vorname" placeholder="Max" value={c.vorname} onChange={(e) => set("vorname", e.target.value)} />
+          <Field label="Nachname" placeholder="Mustermann" value={c.nachname} onChange={(e) => set("nachname", e.target.value)} />
+        </div>
+        <Field label="E-Mail-Adresse" type="email" placeholder="max.mustermann@beispiel.de" value={c.email} onChange={(e) => set("email", e.target.value)} />
+        <Field label="Straße & Hausnummer" placeholder="Sonnenweg 12" value={c.strasse} onChange={(e) => set("strasse", e.target.value)} />
+
+        <SectionLabel icon="⚡">Anlagendaten</SectionLabel>
+        <Field label="Anlagengröße" unit="kWp" type="number" inputMode="decimal" placeholder="0,00" value={c.anlagenGroesse} onChange={(e) => set("anlagenGroesse", e.target.value)} />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Wechselrichtergröße" unit="kW" type="number" inputMode="decimal" placeholder="0,00" value={c.wechselrichterGroesse} onChange={(e) => set("wechselrichterGroesse", e.target.value)} />
+          <Field label="Speichergröße" unit="kWh" type="number" inputMode="decimal" placeholder="0,00" value={c.speicherGroesse} onChange={(e) => set("speicherGroesse", e.target.value)} />
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 4 }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 500 }}>Zusätze</div>
+          <button className="pv-btn pv-focus" onClick={addExtra} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: T.accent2, background: "transparent" }}>＋ Hinzufügen</button>
+        </div>
+        {(c.zusaetze || []).length === 0 ? (
+          <div style={{ fontSize: 12.5, color: T.textFaint, padding: "6px 0 4px" }}>Keine zusätzlichen Angaben.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+            {c.zusaetze.map((z) => (
+              <div key={z.id} style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                <input className="pv-input pv-focus" placeholder="Bezeichnung" style={{ flex: "0 0 40%" }} value={z.label} onChange={(e) => updateExtra(z.id, "label", e.target.value)} />
+                <input className="pv-input pv-focus" placeholder="Wert" style={{ flex: 1 }} value={z.value} onChange={(e) => updateExtra(z.id, "value", e.target.value)} />
+                <button className="pv-btn pv-focus" onClick={() => removeExtra(z.id)} style={{ color: T.textFaint, flexShrink: 0, padding: 4 }} aria-label="Zusatz entfernen">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <SectionLabel icon="📄">Angebot & Wirtschaftlichkeit</SectionLabel>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <DocumentColumn label="Angebot" docs={c.angebot} onAdd={(files) => addDocs("angebot", files)} onRemove={(d) => removeDoc("angebot", d)} uploading={uploadingDoc === "angebot"} />
+          <DocumentColumn label="Wirtschaftlichkeitsblatt" docs={c.wirtschaftlichkeit} onAdd={(files) => addDocs("wirtschaftlichkeit", files)} onRemove={(d) => removeDoc("wirtschaftlichkeit", d)} uploading={uploadingDoc === "wirtschaftlichkeit"} />
+        </div>
+
+        <SectionLabel icon="🖼">Fotodokumentation</SectionLabel>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {PHOTO_CATEGORIES.map((cat) => (
+            <PhotoCategory key={cat.key} cat={cat} photos={(c.photos || {})[cat.key]} onAdd={addPhotos} onRemove={removePhoto} uploading={uploadingCat === cat.key} />
+          ))}
+        </div>
+
+        <SectionLabel icon="📝">Was dem Kunden wichtig ist</SectionLabel>
+        <textarea className="pv-input pv-focus" placeholder="z. B. Kabel möglichst unsichtbar verlegen, Rasen schonen, Terminwunsch…" rows={4} style={{ resize: "vertical" }} value={c.kundenwichtig} onChange={(e) => set("kundenwichtig", e.target.value)} />
+
+        <SectionLabel icon="📝">Was noch fehlt</SectionLabel>
+        <textarea className="pv-input pv-focus" placeholder="z. B. Unterschrift Netzbetreiber-Anmeldung, Statik-Nachweis fehlt noch…" rows={3} style={{ resize: "vertical" }} value={c.fehlt} onChange={(e) => set("fehlt", e.target.value)} />
+
+        <SectionLabel icon="❓">Offene Fragen</SectionLabel>
+        <textarea className="pv-input pv-focus" placeholder="Fragen des Kunden, die vor Ort nicht beantwortet werden konnten…" rows={3} style={{ resize: "vertical" }} value={c.offeneFragen} onChange={(e) => set("offeneFragen", e.target.value)} />
+
+        <SectionLabel icon="✔">Status</SectionLabel>
+        <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+          <button className="pv-btn pv-focus" onClick={() => setStatus("abschluss")}
+            style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px", borderRadius: 10, border: `1px solid ${c.status === "abschluss" ? T.good : T.border}`, background: c.status === "abschluss" ? "rgba(78,158,118,0.15)" : T.panelAlt, color: c.status === "abschluss" ? T.good : T.textMuted, fontWeight: 600, fontSize: 13.5 }}>
+            ✔ Abschluss
+          </button>
+          <button className="pv-btn pv-focus" onClick={() => setStatus("absage")}
+            style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px", borderRadius: 10, border: `1px solid ${c.status === "absage" ? T.danger : T.border}`, background: c.status === "absage" ? "rgba(221,83,84,0.15)" : T.panelAlt, color: c.status === "absage" ? T.danger : T.textMuted, fontWeight: 600, fontSize: 13.5 }}>
+            ✕ Absage
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  App-Root                                                            */
+/* ------------------------------------------------------------------ */
+
+function App() {
+  const [view, setView] = useState("list");
+  const [index, setIndex] = useState([]);
+  const [loadingIndex, setLoadingIndex] = useState(true);
+  const [activeCustomer, setActiveCustomer] = useState(null);
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const [saveError, setSaveError] = useState("");
+  const saveTimer = useRef(null);
+  const savedTimer = useRef(null);
+
+  const refreshIndex = useCallback(() => {
+    setIndex(loadIndexList());
+    setLoadingIndex(false);
+  }, []);
+
+  useEffect(() => { refreshIndex(); }, [refreshIndex]);
+
+  const openCustomer = async (id) => {
+    setView("detail"); setActiveCustomer(null); setSaveStatus("idle");
+    try {
+      const data = loadCustomerRaw(id);
+      const hydrated = data ? await hydrateMedia(data) : { ...EMPTY_CUSTOMER(), id };
+      setActiveCustomer(hydrated);
+    } catch (err) {
+      console.error(err);
+      setActiveCustomer({ ...EMPTY_CUSTOMER(), id });
+    }
+  };
+
+  const createCustomer = () => {
+    const c = { ...EMPTY_CUSTOMER(), id: uid() };
+    setActiveCustomer(c); setView("detail"); setSaveStatus("idle");
+    saveCustomerRaw(c);
+    const entry = { id: c.id, vorname: "", nachname: "", strasse: "", status: null, photoCount: 0, updatedAt: Date.now() };
+    const next = [...loadIndexList(), entry];
+    saveIndexList(next); setIndex(next);
+  };
+
+  const doSave = (updated) => {
+    setSaveStatus("saving"); setSaveError("");
+    try {
+      const toStore = stripMediaForSave(updated);
+      toStore.updatedAt = Date.now();
+      const ok = saveCustomerRaw(toStore);
+      if (!ok) throw new Error("localStorage.setItem ist fehlgeschlagen (Speicher ggf. voll).");
+      const nextIndex = loadIndexList().map((e) => e.id === updated.id ? {
+        ...e, vorname: updated.vorname, nachname: updated.nachname, strasse: updated.strasse,
+        status: updated.status, photoCount: photosDoneCount(updated.photos), updatedAt: toStore.updatedAt,
+      } : e);
+      saveIndexList(nextIndex); setIndex(nextIndex);
+      setSaveStatus("saved");
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+      savedTimer.current = setTimeout(() => setSaveStatus("idle"), 1500);
+    } catch (err) {
+      console.error("Speichern fehlgeschlagen", err);
+      setSaveStatus("error"); setSaveError(err.message || String(err));
+    }
+  };
+
+  const handleChange = (updated) => {
+    setActiveCustomer(updated);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => doSave(updated), 700);
+  };
+  const flushSave = () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; if (activeCustomer) doSave(activeCustomer); }
+  };
+
+  const deleteCustomerById = async (id, nameHint) => {
+    const label = (nameHint || "").trim();
+    if (!window.confirm(`${label ? `"${label}"` : "Diesen Kunden"} und alle Fotos unwiderruflich löschen?`)) return;
+    try {
+      const raw = loadCustomerRaw(id);
+      if (raw) {
+        const ids = collectMediaIds(raw);
+        await Promise.all(ids.map((mid) => mediaDelete(mid).catch(() => {})));
+      }
+      deleteCustomerRaw(id);
+      const next = loadIndexList().filter((e) => e.id !== id);
+      saveIndexList(next); setIndex(next);
+    } catch (err) { console.error(err); }
+    if (activeCustomer && activeCustomer.id === id) { setView("list"); setActiveCustomer(null); }
+  };
+
+  return (
+    <div style={{ background: T.bg, minHeight: "100vh" }}>
+      {view === "list" && <CustomerList index={index} loading={loadingIndex} onOpen={openCustomer} onCreate={createCustomer} onDelete={deleteCustomerById} />}
+      {view === "detail" && (activeCustomer ? (
+        <CustomerDetail customer={activeCustomer} onChange={handleChange}
+          onBack={() => { flushSave(); setView("list"); }}
+          onDelete={(c) => deleteCustomerById(c.id, `${c.vorname} ${c.nachname}`.trim())} onSave={doSave} saveStatus={saveStatus} saveError={saveError} />
+      ) : <div style={{ padding: 40, textAlign: "center", color: T.textMuted }}>Lädt…</div>)}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
