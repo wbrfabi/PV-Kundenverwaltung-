@@ -352,8 +352,10 @@ function CustomerList({ index, onOpen, onCreate, onDelete, loading }) {
 /* ------------------------------------------------------------------ */
 
 function PhotoCategory({ cat, photos, onAdd, onRemove, uploading }) {
-  const inputRef = useRef(null);
+  const cameraRef = useRef(null);
+  const galleryRef = useRef(null);
   const list = photos || []; const done = list.length > 0;
+  const handleFiles = (e) => { const files = Array.from(e.target.files || []); if (files.length) onAdd(cat.key, files); e.target.value = ""; };
   return (
     <div style={{ border: `1px solid ${done ? "rgba(78,158,118,0.4)" : T.border}`, borderRadius: 12, padding: 12, background: T.panel }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
@@ -370,11 +372,14 @@ function PhotoCategory({ cat, photos, onAdd, onRemove, uploading }) {
               aria-label="Foto löschen">✕</button>
           </div>
         ))}
-        <button className="pv-btn pv-focus" onClick={() => inputRef.current && inputRef.current.click()} disabled={uploading}
-          style={{ width: 56, height: 56, borderRadius: 8, border: `1px dashed ${T.borderLight}`, background: T.panelAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
-          aria-label={`Foto zu ${cat.label} hinzufügen`}>{uploading ? "…" : "＋"}</button>
-        <input ref={inputRef} type="file" accept="image/*" multiple style={{ display: "none" }}
-          onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) onAdd(cat.key, files); e.target.value = ""; }} />
+        <button className="pv-btn pv-focus" onClick={() => cameraRef.current && cameraRef.current.click()} disabled={uploading}
+          style={{ width: 56, height: 56, borderRadius: 8, border: `1px dashed ${T.borderLight}`, background: T.panelAlt, color: T.textMuted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 10, gap: 2 }}
+          aria-label={`Foto zu ${cat.label} aufnehmen`}>{uploading ? "…" : <>📷<span>Kamera</span></>}</button>
+        <button className="pv-btn pv-focus" onClick={() => galleryRef.current && galleryRef.current.click()} disabled={uploading}
+          style={{ width: 56, height: 56, borderRadius: 8, border: `1px dashed ${T.borderLight}`, background: T.panelAlt, color: T.textMuted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 10, gap: 2 }}
+          aria-label={`Foto zu ${cat.label} aus Galerie hinzufügen`}>{uploading ? "…" : <>🖼<span>Galerie</span></>}</button>
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFiles} />
+        <input ref={galleryRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={handleFiles} />
       </div>
     </div>
   );
